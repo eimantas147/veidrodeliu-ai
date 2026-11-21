@@ -198,25 +198,93 @@ def save_profiles(profs):
 
 # ---------------- Piesimas ----------------
 def put(img, text, y, color=(255, 255, 255), scale=0.5, x=10):
-    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 3)
-    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1)
+    """Tekstas ant tamsaus fono (aiskiai matosi bet kokiame vaizde)."""
+    (w, h), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
+    roi = img[max(0, y - h - 4):y + base + 2, max(0, x - 4):x + w + 4]
+    if roi.size:
+        roi[:] = (roi * 0.35).astype(roi.dtype)
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
+
+
+# Automobilio vaizdas is virsaus: skydelio mastelis ir padetis
+PANEL_W, PANEL_H, SCALE = 250, 278, 44          # px, px, px/m
+ZOOM = 5                                        # kampu pokyciai ekrane padidinami 5 kartus, kad matytusi
+CAR_CENTER_Y = -0.40                            # automobilio asis y koordinate (m), akys - 0
+CAR_FRONT, CAR_REAR, CAR_HALF_W = 2.0, -2.5, 0.85
+
+
+def _to_px(x, y, ox, oy):
+    """Automobilio koordinates (x - i prieki, y - i kaire) -> skydelio pikseliai (prieki - virsus)."""
+    return int(ox - (y - CAR_CENTER_Y) * SCALE), int(oy - x * SCALE)
+
+
+NOMINAL = mirror_angles(np.zeros(3))[0]
+
+
+def _mirror_geometry(key, angles):
+    """Veidrodelio stiklo kryptis ir kryptis, kuria vairuotojas mato veidrodelyje (is virsaus)."""
+    from geometry import MIRRORS
+    i = 0 if key == "L" else 2
+    base = NOMINAL[i]
+    yaw = math.radians(base + ZOOM * (angles[i] - base))
+    n = np.array([-math.cos(yaw), math.sin(yaw)])           # normale (x, y)
+    m = MIRRORS[key]["pos"][:2]
+    d = m / np.linalg.norm(m)                               # spindulys nuo akiu iki veidrodelio
+    r = d - 2 * np.dot(d, n) * n                            # atspindetas spindulys
+    g = np.array([n[1], -n[0]])                             # stiklo kryptis (statmena normalei)
+    return m, g, r
 
 
 def draw_panel(img, mirrors, proposal):
     H, W = img.shape[:2]
-    x0, y0 = W - 300, H - 150
-    cv2.rectangle(img, (x0, y0), (W - 10, H - 10), (40, 40, 40), -1)
-    put(img, "Veidrodeliai (vaizdas is virsaus)", y0 + 18, (220, 220, 220), 0.42, x0 + 8)
-    for i, name in enumerate(("Kairysis", "Desinysis")):
-        cx, cy = x0 + 70 + i * 140, y0 + 75
-        lines = [(mirrors.angle[2 * i], (255, 255, 255), 3)]
+    x0, y0 = W - PANEL_W - 10, H - PANEL_H - 10
+    roi = img[y0:y0 + PANEL_H, x0:x0 + PANEL_W]
+    roi[:] = (roi * 0.25).astype(roi.dtype)
+    put(img, "Veidrodeliai (vaizdas is virsaus)", y0 + 16, (230, 230, 230), 0.42, x0 + 8)
+    ox, oy = x0 + PANEL_W // 2, y0 + 30 + int(CAR_FRONT * SCALE)
+    # kebulas
+    p1 = _to_px(CAR_FRONT, CAR_CENTER_Y + CAR_HALF_W, ox, oy)
+    p2 = _to_px(CAR_REAR, CAR_CENTER_Y - CAR_HALF_W, ox, oy)
+    for wx in (1.35, -1.6):                                                          # ratai
+        for wy in (CAR_CENTER_Y + CAR_HALF_W, CAR_CENTER_Y - CAR_HALF_W):
+            c = _to_px(wx, wy, ox, oy)
+            cv2.rectangle(img, (c[0] - 4, c[1] - 11), (c[0] + 4, c[1] + 11), (60, 60, 60), -1)
+    cv2.rectangle(img, p1, p2, (150, 150, 150), 2, cv2.LINE_AA)
+    wsx1, wsy = _to_px(0.95, CAR_CENTER_Y + CAR_HALF_W - 0.08, ox, oy)
+    wsx2, _ = _to_px(0.95, CAR_CENTER_Y - CAR_HALF_W + 0.08, ox, oy)
+    cv2.line(img, (wsx1, wsy), (wsx2, wsy), (150, 150, 150), 2, cv2.LINE_AA)        # priekinis stiklas
+    cv2.circle(img, _to_px(0, 0, ox, oy), 7, (190, 200, 230), -1, cv2.LINE_AA)       # vairuotojo galva
+    cv2.putText(img, "prieki", (ox - 18, y0 + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (170, 170, 170), 1, cv2.LINE_AA)
+    for key in ("L", "R"):
+        m, g, r = _mirror_geometry(key, mirrors.angle)
+        mp = np.array(_to_px(m[0], m[1], ox, oy))
+        # matymo laukas (~ +-8 laipsniai aplink atspindeta spinduli)
+        ang = math.atan2(r[1], r[0])
+        pts = [mp]
+        for da in (-8, 8):
+            a = ang + math.radians(da)
+            end = (m[0] + 2.6 * math.cos(a), m[1] + 2.6 * math.sin(a))
+            pts.append(np.array(_to_px(*end, ox, oy)))
+        overlay = img.copy()
+        cv2.fillPoly(overlay, [np.array(pts, np.int32)], (0, 200, 255))
+        cv2.addWeighted(overlay, 0.45, img, 0.55, 0, img)
+        # zvilgsnio linija nuo galvos iki veidrodelio
+        cv2.line(img, _to_px(0, 0, ox, oy), tuple(int(v) for v in mp), (110, 110, 110), 1, cv2.LINE_AA)
+        # pasiulyta padetis (plona oranzine) ir tikra padetis (stora balta)
         if proposal is not None:
-            lines.insert(0, (proposal[2 * i], (0, 200, 255), 1))
-        for ang, col, th in lines:
-            a = math.radians(ang + 90)
-            dx, dy = 38 * math.cos(a), 38 * math.sin(a)
-            cv2.line(img, (int(cx - dx), int(cy + dy)), (int(cx + dx), int(cy - dy)), col, th)
-        put(img, name, y0 + 130, (220, 220, 220), 0.42, cx - 30)
+            _, gp, _ = _mirror_geometry(key, proposal)
+            a, b = m + gp * 0.3, m - gp * 0.3
+            cv2.line(img, _to_px(*a, ox, oy), _to_px(*b, ox, oy), (0, 165, 255), 1, cv2.LINE_AA)
+        a, b = m + g * 0.3, m - g * 0.3
+        cv2.line(img, _to_px(*a, ox, oy), _to_px(*b, ox, oy), (255, 255, 255), 3, cv2.LINE_AA)
+        # korpuso jungtis prie kebulo
+        side = CAR_CENTER_Y + (CAR_HALF_W if key == "L" else -CAR_HALF_W)
+        cv2.line(img, tuple(int(v) for v in mp), _to_px(m[0], side, ox, oy), (90, 90, 90), 3, cv2.LINE_AA)
+        lab = "Kairysis" if key == "L" else "Desinysis"
+        tx = int(mp[0]) - (62 if key == "L" else -8)
+        cv2.putText(img, lab, (tx, int(mp[1]) + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (230, 230, 230), 1, cv2.LINE_AA)
+    cv2.putText(img, "oranzine - ka matote veidrodelyje", (x0 + 8, y0 + PANEL_H - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (170, 170, 170), 1, cv2.LINE_AA)
+    cv2.putText(img, f"(kampu pokyciai padidinti {ZOOM}x)", (x0 + 8, y0 + PANEL_H - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (170, 170, 170), 1, cv2.LINE_AA)
 
 
 def load_model():
